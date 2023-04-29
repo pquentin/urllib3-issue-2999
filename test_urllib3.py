@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import os
 import socket
 import ssl
@@ -9,6 +10,7 @@ from pathlib import Path
 import pytest
 import trustme
 import urllib3
+from pytest_httpserver import HTTPServer
 
 
 @pytest.fixture(scope="session")
@@ -29,34 +31,15 @@ def cert_dir(tmp_path_factory):
     yield str(tmp_path)
 
 
-def wait_for_open_port(port: int, host: str = "localhost", timeout: int = 30):
-    start_time = time.time()
-    while True:
-        try:
-            sock = socket.create_connection((host, port), timeout=0.1)
-            sock.close()
-            break
-        except socket.error:
-            time.sleep(0.01)
-            if time.time() - start_time > timeout:
-                raise TimeoutError()
+@pytest.fixture(scope="session")
+def https_server(cert_dir):
+    context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    context.load_cert_chain(os.path.join(cert_dir, "server.pem"))
+    server = HTTPServer(ssl_context=context)
+    server.expect_request("/foobar").respond_with_json({"foo": "bar"})
 
-
-@pytest.fixture
-def httpsserver_custom(cert_dir):
-    """The returned ``httpsserver`` (note the additional S!) provides a
-    threaded HTTP server instance similar to funcarg ``httpserver`` but with
-    SSL encryption.
-    """
-    from pytest_localserver import https
-
-    key = os.path.join(cert_dir, "server.pem")
-
-    server = https.SecureContentServer(key=key, cert=key)
     server.start()
-
     yield server
-
     server.stop()
 
 
@@ -82,11 +65,7 @@ def cert_fingerprint(server_cert):
 
 
 @pytest.mark.parametrize("cert_name", ["server.pem", "wrong_cert.pem"])
-def test_ssl_cert_pinning(httpsserver_custom, cert_dir, cert_name):
-    wait_for_open_port(httpsserver_custom.server_address[1])
-    httpsserver_custom.serve_content(
-        code=202, content="", headers={"Location": "https://example.com/foo"}
-    )
+def test_ssl_cert_pinning(https_server, cert_dir, cert_name):
     server_cert = os.path.join(cert_dir, cert_name)
     http = urllib3.PoolManager(
         assert_fingerprint=cert_fingerprint(server_cert),
@@ -95,10 +74,11 @@ def test_ssl_cert_pinning(httpsserver_custom, cert_dir, cert_name):
     )
 
     if cert_name == "server.pem":
-        resp = http.request("GET", httpsserver_custom.url)
-        assert resp.status == 202
+        resp = http.request("GET", https_server.url_for("/foobar"))
+        assert resp.status == 200
+        assert json.loads(resp.data) == {"foo": "bar"}
     elif cert_name == "wrong_cert.pem":
         with pytest.raises(urllib3.exceptions.MaxRetryError):
-            http.request("GET", httpsserver_custom.url)
+            http.request("GET", https_server.url_for("/foobar"))
     else:
         raise ValueError(cert_name)
