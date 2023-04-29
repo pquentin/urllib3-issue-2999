@@ -67,18 +67,19 @@ def cert_fingerprint(server_cert):
 @pytest.mark.parametrize("cert_name", ["server.pem", "wrong_cert.pem"])
 def test_ssl_cert_pinning(https_server, cert_dir, cert_name):
     server_cert = os.path.join(cert_dir, cert_name)
-    http = urllib3.PoolManager(
-        assert_fingerprint=cert_fingerprint(server_cert),
+    with urllib3.HTTPSConnectionPool(
+        https_server.host,
+        https_server.port,
+        cert_reqs="CERT_NONE",
         assert_hostname=False,
-        cert_reqs=ssl.CERT_NONE,
-    )
-
-    if cert_name == "server.pem":
-        resp = http.request("GET", https_server.url_for("/foobar"))
-        assert resp.status == 200
-        assert json.loads(resp.data) == {"foo": "bar"}
-    elif cert_name == "wrong_cert.pem":
-        with pytest.raises(urllib3.exceptions.MaxRetryError):
-            http.request("GET", https_server.url_for("/foobar"))
-    else:
-        raise ValueError(cert_name)
+        assert_fingerprint=cert_fingerprint(server_cert),
+    ) as https_pool:
+        if cert_name == "server.pem":
+            resp = https_pool.request("GET", "/foobar")
+            assert resp.status == 200
+            assert json.loads(resp.data) == {"foo": "bar"}
+        elif cert_name == "wrong_cert.pem":
+            with pytest.raises(urllib3.exceptions.MaxRetryError):
+                https_pool.request("GET", "/foobar", retries=0)
+        else:
+            raise ValueError(cert_name)
